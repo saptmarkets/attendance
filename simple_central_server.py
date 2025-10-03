@@ -34,6 +34,19 @@ def init_database():
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)
 	''')
+	# ADMS queue tables (to accept device push directly)
+	conn.execute('''
+		CREATE TABLE IF NOT EXISTS adms_attendance_queue (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			branch_id TEXT,
+			user_id TEXT,
+			timestamp TEXT,
+			punch_type INTEGER,
+			status INTEGER,
+			event_id TEXT UNIQUE,
+			created_at TEXT DEFAULT CURRENT_TIMESTAMP
+		)
+	''')
 	conn.execute('''
 		CREATE TABLE IF NOT EXISTS sync_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -150,6 +163,62 @@ def api_stats():
 		FROM attendance_logs''').fetchone()
 	conn.close()
 	return jsonify({'total_branches':row['total_branches'],'total_records':row['total_records'],'today_records':row['today_records'],'unsynced_records':row['unsynced_records'],'latest_record':row['latest_records'],'earliest_record':row['earliest_records']})
+
+# -----------------------------
+# ADMS endpoints (device direct push)
+# -----------------------------
+
+@app.route('/biometric/adms_push', methods=['POST'])
+def adms_push():
+	"""Accepts ADMS-like JSON payloads directly from device/bridge.
+
+	Expected minimal shape:
+	{
+	  "event_type": "attendance",
+	  "branch_id": 1,
+	  "data": [{"user_id": "123", "timestamp": "YYYY-mm-dd HH:MM:SS", "punch_type": 1, "status": 1, "event_id": "..."}]
+	}
+	"""
+	try:
+		payload = request.get_json(silent=True)
+		if not payload:
+			return jsonify({'error': 'No JSON data received'}), 400
+		if payload.get('event_type') != 'attendance':
+			return jsonify({'error': 'Unsupported event_type; expected attendance'}), 400
+		branch_id = payload.get('branch_id')
+		records = payload.get('data', [])
+		conn = sqlite3.connect(DB_FILE)
+		c = conn.cursor()
+		inserted = 0
+		for rec in records:
+			try:
+				c.execute('''INSERT OR IGNORE INTO adms_attendance_queue
+					(branch_id, user_id, timestamp, punch_type, status, event_id)
+					VALUES (?,?,?,?,?,?)''', (
+					str(branch_id), str(rec.get('user_id')), rec.get('timestamp'),
+					int(rec.get('punch_type', 1)), int(rec.get('status', 1)), rec.get('event_id', '')
+				))
+				if c.rowcount == 1:
+					inserted += 1
+			except Exception:
+				continue
+		conn.commit(); conn.close()
+		return jsonify({'status': 'success', 'records_queued': inserted})
+	except Exception as e:
+		return jsonify({'error': str(e)}), 500
+
+@app.route('/biometric/health')
+def adms_health():
+	return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
+
+@app.route('/biometric/queue_status')
+def adms_queue_status():
+	conn = sqlite3.connect(DB_FILE)
+	c = conn.cursor()
+	c.execute('SELECT COUNT(*) FROM adms_attendance_queue')
+	count = c.fetchone()[0]
+	conn.close()
+	return jsonify({'pending_attendance': count, 'timestamp': datetime.now().isoformat()})
 
 if __name__ == '__main__':
 	init_database()
