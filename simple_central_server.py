@@ -80,6 +80,17 @@ def init_database():
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)
 	''')
+	# Simple job queue for polling agents
+	conn.execute('''
+		CREATE TABLE IF NOT EXISTS sync_jobs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			branch_id INTEGER NOT NULL,
+			status TEXT DEFAULT 'pending',
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+			picked_at TIMESTAMP,
+			done_at TIMESTAMP
+		)
+	''')
 	conn.commit()
 	conn.close()
 
@@ -142,6 +153,7 @@ def dashboard():
 	</table></div>
     <div class="section">
     <a href="/refresh_latest" class="btn">Pull Latest (ingest ADMS queue)</a>
+    <a href="/enqueue_sync?branch_id=1" class="btn">Sync Now (Branch 1)</a>
     </div>
 	</div></body></html>'''
 	return render_template_string(html, stats=stats, recent_logs=recent_logs, branch_status=branch_status)
@@ -289,6 +301,36 @@ def recent_http_logs():
 	rows = conn.execute('SELECT * FROM adms_http_log ORDER BY id DESC LIMIT 50').fetchall()
 	conn.close()
 	return jsonify([{k: row[k] for k in row.keys()} for row in rows])
+
+@app.route('/enqueue_sync')
+def enqueue_sync():
+	branch_id = request.args.get('branch_id', '1')
+	conn = sqlite3.connect(DB_FILE)
+	conn.execute('INSERT INTO sync_jobs (branch_id, status) VALUES (?, "pending")', (branch_id,))
+	conn.commit(); conn.close()
+	return jsonify({'status':'queued','branch_id': branch_id})
+
+@app.route('/api/branches/<int:branch_id>/next_job')
+def next_job(branch_id: int):
+	conn = sqlite3.connect(DB_FILE)
+	conn.row_factory = sqlite3.Row
+	row = conn.execute('SELECT * FROM sync_jobs WHERE branch_id=? AND status="pending" ORDER BY id ASC LIMIT 1', (branch_id,)).fetchone()
+	if not row:
+		conn.close()
+		return jsonify({'action': 'none'})
+	conn.execute('UPDATE sync_jobs SET status="picked", picked_at=datetime("now") WHERE id=?', (row['id'],))
+	conn.commit(); conn.close()
+	return jsonify({'action':'sync_now','job_id': row['id']})
+
+@app.route('/api/branches/<int:branch_id>/job_done', methods=['POST'])
+def job_done(branch_id: int):
+	job_id = request.json.get('job_id') if request.is_json else request.args.get('job_id')
+	if not job_id:
+		return jsonify({'error':'job_id required'}), 400
+	conn = sqlite3.connect(DB_FILE)
+	conn.execute('UPDATE sync_jobs SET status="done", done_at=datetime("now") WHERE id=? AND branch_id=?', (job_id, branch_id))
+	conn.commit(); conn.close()
+	return jsonify({'status':'ok'})
 
 def _move_adms_queue_to_logs(max_rows: int = 200, force_branch: str | None = None) -> int:
 	conn = sqlite3.connect(DB_FILE)
