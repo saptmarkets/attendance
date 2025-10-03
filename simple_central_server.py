@@ -227,34 +227,34 @@ def adms_queue_status():
 	return jsonify({'pending_attendance': count, 'timestamp': datetime.now().isoformat()})
 
 def _move_adms_queue_to_logs(max_rows: int = 200, force_branch: str | None = None) -> int:
-    conn = sqlite3.connect(DB_FILE)
-    conn.row_factory = sqlite3.Row
-    c = conn.cursor()
-    c.execute('SELECT * FROM adms_attendance_queue ORDER BY id ASC LIMIT ?', (max_rows,))
-    rows = c.fetchall()
-    inserted = 0
-    last_branch = None
-    for r in rows:
-        branch_id = int(force_branch or (r['branch_id'] or 0) or 0)
-        last_branch = branch_id
-        user_id = str(r['user_id'])
-        check_time = r['timestamp']
-        punch_type = r['punch_type']
-        status = r['status']
-        event_id = r['event_id'] or f"adms-{r['id']}"
-        conn.execute('''INSERT OR REPLACE INTO branches (branch_id, branch_name, api_token)
-                        VALUES (?, COALESCE((SELECT branch_name FROM branches WHERE branch_id=?),'ADMS Branch'), 'token_'||?)''', (branch_id, branch_id, branch_id))
-        cur = conn.execute('''INSERT OR IGNORE INTO attendance_logs
-                               (branch_id, employee_id, check_time, punch_type, status, machine_id, event_id)
-                               VALUES (?,?,?,?,?,?,?)''', (branch_id, user_id, check_time, punch_type, status, 'ADMS', event_id))
-        if getattr(cur, 'rowcount', -1) == 1:
-            inserted += 1
-        conn.execute('DELETE FROM adms_attendance_queue WHERE id=?', (r['id'],))
-    if inserted and last_branch is not None:
-        conn.execute('''INSERT OR REPLACE INTO sync_status (branch_id, last_sync_time, sync_count)
-                        VALUES (?, datetime('now'), COALESCE((SELECT sync_count FROM sync_status WHERE branch_id=?),0)+1)''', (last_branch, last_branch))
-    conn.commit(); conn.close()
-    return inserted
+	conn = sqlite3.connect(DB_FILE)
+	conn.row_factory = sqlite3.Row
+	c = conn.cursor()
+	c.execute('SELECT * FROM adms_attendance_queue ORDER BY id ASC LIMIT ?', (max_rows,))
+	rows = c.fetchall()
+	inserted = 0
+	last_branch = None
+	for r in rows:
+		branch_id = int(force_branch or (r['branch_id'] or 0) or 0)
+		last_branch = branch_id
+		user_id = str(r['user_id'])
+		check_time = r['timestamp']
+		punch_type = r['punch_type']
+		status = r['status']
+		event_id = r['event_id'] or f"adms-{r['id']}"
+		conn.execute('''INSERT OR REPLACE INTO branches (branch_id, branch_name, api_token)
+						VALUES (?, COALESCE((SELECT branch_name FROM branches WHERE branch_id=?),'ADMS Branch'), 'token_'||?)''', (branch_id, branch_id, branch_id))
+		cur = conn.execute('''INSERT OR IGNORE INTO attendance_logs
+							  (branch_id, employee_id, check_time, punch_type, status, machine_id, event_id)
+							  VALUES (?,?,?,?,?,?,?)''', (branch_id, user_id, check_time, punch_type, status, 'ADMS', event_id))
+		if getattr(cur, 'rowcount', -1) == 1:
+			inserted += 1
+		conn.execute('DELETE FROM adms_attendance_queue WHERE id=?', (r['id'],))
+	if inserted and last_branch is not None:
+		conn.execute('''INSERT OR REPLACE INTO sync_status (branch_id, last_sync_time, sync_count)
+						VALUES (?, datetime('now'), COALESCE((SELECT sync_count FROM sync_status WHERE branch_id=?),0)+1)''', (last_branch, last_branch))
+	conn.commit(); conn.close()
+	return inserted
 
 @app.route('/biometric/ingest_queue', methods=['POST', 'GET'])
 def adms_ingest_queue():
@@ -264,18 +264,18 @@ def adms_ingest_queue():
 	- max: number of records to process (default 200)
 	- branch_id: override/force branch id for inserted rows if needed
 	"""
-    try:
-        max_rows = int(request.args.get('max', '200'))
-        force_branch = request.args.get('branch_id')
-        moved = _move_adms_queue_to_logs(max_rows=max_rows, force_branch=force_branch)
-        return jsonify({'status':'success','moved': moved})
+	try:
+		max_rows = int(request.args.get('max', '200'))
+		force_branch = request.args.get('branch_id')
+		moved = _move_adms_queue_to_logs(max_rows=max_rows, force_branch=force_branch)
+		return jsonify({'status':'success','moved': moved})
 	except Exception as e:
 		return jsonify({'error': str(e)}), 500
 
 @app.route('/refresh_latest')
 def refresh_latest():
-    _move_adms_queue_to_logs(max_rows=500)
-    return redirect(url_for('dashboard'))
+	_move_adms_queue_to_logs(max_rows=500)
+	return redirect(url_for('dashboard'))
 
 if __name__ == '__main__':
 	init_database()
