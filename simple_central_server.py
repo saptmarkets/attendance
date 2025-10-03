@@ -47,6 +47,18 @@ def init_database():
 			created_at TEXT DEFAULT CURRENT_TIMESTAMP
 		)
 	''')
+	# Minimal HTTP debug log for ADMS troubleshooting
+	conn.execute('''
+		CREATE TABLE IF NOT EXISTS adms_http_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			ts TEXT,
+			method TEXT,
+			path TEXT,
+			remote_addr TEXT,
+			user_agent TEXT,
+			body TEXT
+		)
+	''')
 	conn.execute('''
 		CREATE TABLE IF NOT EXISTS sync_status (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -184,6 +196,15 @@ def adms_push():
 	}
 	"""
 	try:
+		# debug log
+		try:
+			conn_dbg = sqlite3.connect(DB_FILE)
+			conn_dbg.execute('INSERT INTO adms_http_log (ts, method, path, remote_addr, user_agent, body) VALUES (?,?,?,?,?,?)', (
+				datetime.now().isoformat(), request.method, request.path, request.headers.get('X-Forwarded-For','') or request.remote_addr, request.headers.get('User-Agent',''), (request.get_data(as_text=True) or '')[:2000]
+			))
+			conn_dbg.commit(); conn_dbg.close()
+		except Exception:
+			pass
 		payload = request.get_json(silent=True)
 		if not payload:
 			return jsonify({'error': 'No JSON data received'}), 400
@@ -225,6 +246,28 @@ def adms_queue_status():
 	count = c.fetchone()[0]
 	conn.close()
 	return jsonify({'pending_attendance': count, 'timestamp': datetime.now().isoformat()})
+
+@app.route('/biometric/debug_echo', methods=['GET','POST'])
+def adms_debug_echo():
+	"""Echo back request info to validate device connectivity."""
+	info = {
+		'timestamp': datetime.now().isoformat(),
+		'method': request.method,
+		'path': request.path,
+		'remote_addr': request.headers.get('X-Forwarded-For','') or request.remote_addr,
+		'headers': {k:v for k,v in request.headers.items()},
+		'args': request.args.to_dict(),
+		'json': request.get_json(silent=True),
+	}
+	return jsonify(info)
+
+@app.route('/biometric/recent_http_logs')
+def recent_http_logs():
+	conn = sqlite3.connect(DB_FILE)
+	conn.row_factory = sqlite3.Row
+	rows = conn.execute('SELECT * FROM adms_http_log ORDER BY id DESC LIMIT 50').fetchall()
+	conn.close()
+	return jsonify([{k: row[k] for k in row.keys()} for row in rows])
 
 def _move_adms_queue_to_logs(max_rows: int = 200, force_branch: str | None = None) -> int:
 	conn = sqlite3.connect(DB_FILE)
