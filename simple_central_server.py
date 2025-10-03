@@ -1,7 +1,7 @@
 import os
 import sqlite3
 from datetime import datetime
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, redirect, url_for
 
 app = Flask(__name__)
 app.secret_key = 'change-me'
@@ -109,12 +109,15 @@ def dashboard():
 	<tr><td>{{r.branch_name}}</td><td>{{r.last_sync_time or 'Never'}}</td><td>{{r.sync_count or 0}}</td><td>{{'Error' if r.last_error else 'OK'}}</td></tr>
 	{% endfor %}
 	</table></div>
-	<div class="section"><h3>Recent Activity</h3>
+    <div class="section"><h3>Recent Activity</h3>
 	<table><tr><th>Branch</th><th>Emp ID</th><th>Time</th><th>Type</th></tr>
 	{% for l in recent_logs %}
 	<tr><td>{{l.branch_name}}</td><td>{{l.employee_id}}</td><td>{{l.check_time}}</td><td>{{l.punch_type}}</td></tr>
 	{% endfor %}
 	</table></div>
+    <div class="section">
+    <a href="/refresh_latest" class="btn">Pull Latest (ingest ADMS queue)</a>
+    </div>
 	</div></body></html>'''
 	return render_template_string(html, stats=stats, recent_logs=recent_logs, branch_status=branch_status)
 
@@ -223,6 +226,36 @@ def adms_queue_status():
 	conn.close()
 	return jsonify({'pending_attendance': count, 'timestamp': datetime.now().isoformat()})
 
+def _move_adms_queue_to_logs(max_rows: int = 200, force_branch: str | None = None) -> int:
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute('SELECT * FROM adms_attendance_queue ORDER BY id ASC LIMIT ?', (max_rows,))
+    rows = c.fetchall()
+    inserted = 0
+    last_branch = None
+    for r in rows:
+        branch_id = int(force_branch or (r['branch_id'] or 0) or 0)
+        last_branch = branch_id
+        user_id = str(r['user_id'])
+        check_time = r['timestamp']
+        punch_type = r['punch_type']
+        status = r['status']
+        event_id = r['event_id'] or f"adms-{r['id']}"
+        conn.execute('''INSERT OR REPLACE INTO branches (branch_id, branch_name, api_token)
+                        VALUES (?, COALESCE((SELECT branch_name FROM branches WHERE branch_id=?),'ADMS Branch'), 'token_'||?)''', (branch_id, branch_id, branch_id))
+        cur = conn.execute('''INSERT OR IGNORE INTO attendance_logs
+                               (branch_id, employee_id, check_time, punch_type, status, machine_id, event_id)
+                               VALUES (?,?,?,?,?,?,?)''', (branch_id, user_id, check_time, punch_type, status, 'ADMS', event_id))
+        if getattr(cur, 'rowcount', -1) == 1:
+            inserted += 1
+        conn.execute('DELETE FROM adms_attendance_queue WHERE id=?', (r['id'],))
+    if inserted and last_branch is not None:
+        conn.execute('''INSERT OR REPLACE INTO sync_status (branch_id, last_sync_time, sync_count)
+                        VALUES (?, datetime('now'), COALESCE((SELECT sync_count FROM sync_status WHERE branch_id=?),0)+1)''', (last_branch, last_branch))
+    conn.commit(); conn.close()
+    return inserted
+
 @app.route('/biometric/ingest_queue', methods=['POST', 'GET'])
 def adms_ingest_queue():
 	"""Move queued ADMS records into main attendance_logs so they appear on the dashboard/stats.
@@ -231,41 +264,18 @@ def adms_ingest_queue():
 	- max: number of records to process (default 200)
 	- branch_id: override/force branch id for inserted rows if needed
 	"""
-	try:
-		max_rows = int(request.args.get('max', '200'))
-		force_branch = request.args.get('branch_id')
-		conn = sqlite3.connect(DB_FILE)
-		conn.row_factory = sqlite3.Row
-		c = conn.cursor()
-		c.execute('SELECT * FROM adms_attendance_queue ORDER BY id ASC LIMIT ?', (max_rows,))
-		rows = c.fetchall()
-		inserted = 0
-		for r in rows:
-			branch_id = int(force_branch or (r['branch_id'] or 0) or 0)
-			user_id = str(r['user_id'])
-			check_time = r['timestamp']
-			punch_type = r['punch_type']
-			status = r['status']
-			event_id = r['event_id'] or f"adms-{r['id']}"
-			# ensure branch exists
-			conn.execute('''INSERT OR REPLACE INTO branches (branch_id, branch_name, api_token)
-				VALUES (?, COALESCE((SELECT branch_name FROM branches WHERE branch_id=?),'ADMS Branch'), 'token_'||?)''', (branch_id, branch_id, branch_id))
-			# insert into main table (ignore duplicates by event_id uniqueness not enforced here; use OR IGNORE by composite)
-			cur = conn.execute('''INSERT OR IGNORE INTO attendance_logs
-				(branch_id, employee_id, check_time, punch_type, status, machine_id, event_id)
-				VALUES (?,?,?,?,?,?,?)''', (branch_id, user_id, check_time, punch_type, status, 'ADMS', event_id))
-			if getattr(cur, 'rowcount', -1) == 1:
-				inserted += 1
-			# delete from queue row by row once attempted to avoid reprocessing
-			conn.execute('DELETE FROM adms_attendance_queue WHERE id=?', (r['id'],))
-		# update sync status
-		if inserted:
-			conn.execute('''INSERT OR REPLACE INTO sync_status (branch_id, last_sync_time, sync_count)
-				VALUES (?, datetime('now'), COALESCE((SELECT sync_count FROM sync_status WHERE branch_id=?),0)+1)''', (branch_id, branch_id))
-		conn.commit(); conn.close()
-		return jsonify({'status':'success','moved': inserted})
+    try:
+        max_rows = int(request.args.get('max', '200'))
+        force_branch = request.args.get('branch_id')
+        moved = _move_adms_queue_to_logs(max_rows=max_rows, force_branch=force_branch)
+        return jsonify({'status':'success','moved': moved})
 	except Exception as e:
 		return jsonify({'error': str(e)}), 500
+
+@app.route('/refresh_latest')
+def refresh_latest():
+    _move_adms_queue_to_logs(max_rows=500)
+    return redirect(url_for('dashboard'))
 
 if __name__ == '__main__':
 	init_database()
