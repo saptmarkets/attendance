@@ -159,9 +159,9 @@ def receive_attendance():
 		branch_name = data['branch_name']
 		payload = data['data']
 		conn = get_db_connection()
-        branch_label = branch_name or ('Device 1' if str(branch_id) == '1' else f'Branch {branch_id}')
-        conn.execute('''INSERT OR REPLACE INTO branches (branch_id, branch_name, api_token)
-            VALUES (?,?, 'token_'||?)''', (branch_id, branch_label, branch_id))
+		branch_label = branch_name or ('Device 1' if str(branch_id) == '1' else f'Branch {branch_id}')
+		conn.execute('''INSERT OR REPLACE INTO branches (branch_id, branch_name, api_token)
+			VALUES (?,?, 'token_'||?)''', (branch_id, branch_label, branch_id))
 		inserted = 0
 		for rec in payload.get('attendance_logs', []):
 			try:
@@ -169,15 +169,15 @@ def receive_attendance():
 					(branch_id, employee_id, check_time, punch_type, status, machine_id, event_id)
 					VALUES (?,?,?,?,?,?,?)''', (
 					branch_id, rec['user_id'], rec['timestamp'], rec.get('punch_type'), rec.get('status'), rec.get('machine_id'), rec['event_id']))
-                if getattr(cur, 'rowcount', -1) == 1:
-                    inserted += 1
-                    # Upsert employee name if provided in payload.employees
-                    emp_list = payload.get('employees') or []
-                    for emp in emp_list:
-                        if str(emp.get('user_id')) == str(rec['user_id']):
-                            conn.execute('''INSERT OR REPLACE INTO employees (branch_id, user_id, name, card_number)
-                                VALUES (?,?,?,?)''', (branch_id, str(emp.get('user_id')), emp.get('name',''), str(emp.get('card_number',''))))
-                            break
+				if getattr(cur, 'rowcount', -1) == 1:
+					inserted += 1
+					# Upsert employee name if provided in payload.employees
+					emp_list = payload.get('employees') or []
+					for emp in emp_list:
+						if str(emp.get('user_id')) == str(rec['user_id']):
+							conn.execute('''INSERT OR REPLACE INTO employees (branch_id, user_id, name, card_number)
+								VALUES (?,?,?,?)''', (branch_id, str(emp.get('user_id')), emp.get('name',''), str(emp.get('card_number',''))))
+							break
 			except sqlite3.IntegrityError:
 				continue
 		conn.execute('''INSERT OR REPLACE INTO sync_status (branch_id, last_sync_time, sync_count)
