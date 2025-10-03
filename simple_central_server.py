@@ -34,6 +34,17 @@ def init_database():
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		)
 	''')
+	# Employees master for showing names
+	conn.execute('''
+		CREATE TABLE IF NOT EXISTS employees (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			branch_id INTEGER NOT NULL,
+			user_id TEXT NOT NULL,
+			name TEXT,
+			card_number TEXT,
+			UNIQUE(branch_id, user_id)
+		)
+	''')
 	# ADMS queue tables (to accept device push directly)
 	conn.execute('''
 		CREATE TABLE IF NOT EXISTS adms_attendance_queue (
@@ -88,8 +99,10 @@ def dashboard():
 		FROM attendance_logs
 	''').fetchone()
 	recent_logs = conn.execute('''
-		SELECT al.*, b.branch_name FROM attendance_logs al
+		SELECT al.*, b.branch_name, COALESCE(e.name,'') AS employee_name
+		FROM attendance_logs al
 		JOIN branches b ON al.branch_id=b.branch_id
+		LEFT JOIN employees e ON e.branch_id=al.branch_id AND e.user_id=al.employee_id
 		ORDER BY al.check_time DESC LIMIT 20
 	''').fetchall()
 	branch_status = conn.execute('''
@@ -122,9 +135,9 @@ def dashboard():
 	{% endfor %}
 	</table></div>
     <div class="section"><h3>Recent Activity</h3>
-	<table><tr><th>Branch</th><th>Emp ID</th><th>Time</th><th>Type</th></tr>
+	<table><tr><th>Branch</th><th>Emp ID</th><th>Name</th><th>Time</th><th>Type</th></tr>
 	{% for l in recent_logs %}
-	<tr><td>{{l.branch_name}}</td><td>{{l.employee_id}}</td><td>{{l.check_time}}</td><td>{{l.punch_type}}</td></tr>
+	<tr><td>{{l.branch_name}}</td><td>{{l.employee_id}}</td><td>{{l.employee_name}}</td><td>{{l.check_time}}</td><td>{{l.punch_type}}</td></tr>
 	{% endfor %}
 	</table></div>
     <div class="section">
@@ -146,8 +159,9 @@ def receive_attendance():
 		branch_name = data['branch_name']
 		payload = data['data']
 		conn = get_db_connection()
-		conn.execute('''INSERT OR REPLACE INTO branches (branch_id, branch_name, api_token)
-			VALUES (?,?, 'token_'||?)''', (branch_id, branch_name, branch_id))
+        branch_label = branch_name or ('Device 1' if str(branch_id) == '1' else f'Branch {branch_id}')
+        conn.execute('''INSERT OR REPLACE INTO branches (branch_id, branch_name, api_token)
+            VALUES (?,?, 'token_'||?)''', (branch_id, branch_label, branch_id))
 		inserted = 0
 		for rec in payload.get('attendance_logs', []):
 			try:
@@ -155,8 +169,15 @@ def receive_attendance():
 					(branch_id, employee_id, check_time, punch_type, status, machine_id, event_id)
 					VALUES (?,?,?,?,?,?,?)''', (
 					branch_id, rec['user_id'], rec['timestamp'], rec.get('punch_type'), rec.get('status'), rec.get('machine_id'), rec['event_id']))
-				if getattr(cur, 'rowcount', -1) == 1:
-					inserted += 1
+                if getattr(cur, 'rowcount', -1) == 1:
+                    inserted += 1
+                    # Upsert employee name if provided in payload.employees
+                    emp_list = payload.get('employees') or []
+                    for emp in emp_list:
+                        if str(emp.get('user_id')) == str(rec['user_id']):
+                            conn.execute('''INSERT OR REPLACE INTO employees (branch_id, user_id, name, card_number)
+                                VALUES (?,?,?,?)''', (branch_id, str(emp.get('user_id')), emp.get('name',''), str(emp.get('card_number',''))))
+                            break
 			except sqlite3.IntegrityError:
 				continue
 		conn.execute('''INSERT OR REPLACE INTO sync_status (branch_id, last_sync_time, sync_count)
