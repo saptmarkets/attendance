@@ -169,6 +169,7 @@ def api_stats():
 # -----------------------------
 
 @app.route('/biometric/adms_push', methods=['POST'])
+@app.route('/biometric/admsPush', methods=['POST'])
 def adms_push():
 	"""Accepts ADMS-like JSON payloads directly from device/bridge.
 
@@ -208,10 +209,12 @@ def adms_push():
 		return jsonify({'error': str(e)}), 500
 
 @app.route('/biometric/health')
+@app.route('/biometric/healthCheck')
 def adms_health():
 	return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
 @app.route('/biometric/queue_status')
+@app.route('/biometric/queueStatus')
 def adms_queue_status():
 	conn = sqlite3.connect(DB_FILE)
 	c = conn.cursor()
